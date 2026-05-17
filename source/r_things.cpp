@@ -1092,8 +1092,6 @@ inline static byte R_getDrawStyle(const Mobj *const thing, int *tranmaplump)
             return VS_DRAWSTYLE_SUB;
         else if(uint16_t(thing->translucency - 1) < FRACUNIT - 1)
             return VS_DRAWSTYLE_ALPHA;
-        else if(thing->flags & MF_TRANSLUCENT)
-            return VS_DRAWSTYLE_TRANMAP;
         else if(thing->flags3 & MF3_GHOST)
         {
             if(rTintTableIndex != -1)
@@ -1105,6 +1103,8 @@ inline static byte R_getDrawStyle(const Mobj *const thing, int *tranmaplump)
             else
                 return VS_DRAWSTYLE_ALPHA;
         }
+        else if(thing->flags & MF_TRANSLUCENT)
+            return VS_DRAWSTYLE_TRANMAP;
     }
 
     return VS_DRAWSTYLE_NORMAL;
@@ -1469,6 +1469,10 @@ static void R_projectSprite(cmapcontext_t &cmapcontext, spritecontext_t &spritec
     // haleyjd: moved this down, added footclip term
     // This needs to be scaled down (?) I don't get why this works...
     vis->texturemid = (fixed_t)((gzt - viewpoint.z - vis->footclip) / thing->yscale);
+
+    // printz: disable footclip on slopes because it doesn't match the slope
+    if(thing->zref.sector.floor && thing->zref.sector.floor->srf.floor.slope)
+        vis->footclip = 0;
 
     vis->patch = lump;
 

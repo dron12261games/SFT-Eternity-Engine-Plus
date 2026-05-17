@@ -1416,7 +1416,7 @@ struct teleparms_t
     teleangle_e teleangle;
 };
 
-bool P_HereticTeleport(Mobj *thing, fixed_t x, fixed_t y, angle_t angle, bool alwaysfrag);
+int P_Teleport(Mobj *thing, v2fixed_t landingpos, angle_t landingangle, bool alwaysfrag);
 
 int EV_Teleport(int tag, int side, Mobj *thing, bool alwaysfrag);
 
@@ -1534,7 +1534,7 @@ int EV_DoGenDoor(const line_t *line, Mobj *thing, int special, int tag);
 
 int EV_DoGenLockedDoor(const line_t *line, Mobj *thing, int special, int tag);
 
-void P_ChangeLineTex(const char *texture, int pos, int side, int tag, bool usetag, line_t *triggerLine);
+void P_ChangeLineTex(const char *texture, int pos, int side, int tag, line_t *triggerLine);
 
 // p_things
 
@@ -1676,7 +1676,7 @@ void P_ZeroSectorSpecial(sector_t *);
 
 void P_SetLineID(line_t *line, int id);
 
-v3fixed_t P_GetArrivalTelefogLocation(v3fixed_t landing, angle_t angle);
+v3fixed_t P_GetArrivalTelefogLocation(const Mobj &thing, v3fixed_t landing, angle_t angle);
 
 // haleyjd: parameterized lines
 
