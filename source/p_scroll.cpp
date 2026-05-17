@@ -912,4 +912,3 @@ void P_ForEachScrolledSector(void (*func)(sector_t *sector, bool isceiling, v2fi
 // killough 3/7/98 -- end generalized scroll effects
 
 // EOF
-

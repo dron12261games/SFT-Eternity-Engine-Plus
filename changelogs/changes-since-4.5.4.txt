@@ -58,6 +58,8 @@ Features
   lights. Thanks to elf-alchemist for the contribution! Details here: https://github.com/team-eternity/eternity/pull/740
 * Added support for wall texture scaling, which includes top, middle, and bottom X and Y scaling.
 * Added support for wrapping 2-sided middle textures.
+* 3DMidTex polyobjects can now work as transporters. Also, they no longer change their Y offsets when crossing elevations.
+* Passable 2-sided polyobject lines no longer push solid things.
 * New thing type flag NOSEEKINVISIBLE for projectiles, which prevents the seeker from targeting players with 
   invisibility powerup active.
 * New thing type flag IGNORESEEKER for things, which prevents them from being targeted by seekers.
@@ -92,6 +94,15 @@ Improvements
 * Relax UMAPINFO to tolerate "endbunny = false" and "endcast = false". Needed because of released WADs,
   and other popular source ports implementing the specification poorly.
 * Right Alt key can now active the fast exit and fullscreen toggle.
+* Fixed Plane_Copy linedef special from crashing if the fifth argument is nonzero but the designated source sector
+  surface has no slope. Now it will just clear the slope of the other surface and match its height.
+* Terrain splashes now spawn correctly on sloped liquids.
+* Removed foot-clip on sloped liquids because it would cut off the sprite even when not submerged
+* ACS CheckActorCeilingTexture and CheckActorFloorTexture are now portal-aware.
+* ACS SetLineBlocking now also supports BLOCK_PLAYERS.
+* Fixed so the Heretic ghost translucency takes precedence over the weaker (by TRANMAP) Boom default translucency.
+* Added some readily available APROP implementations to the GetActorProperty and CheckActorProperty ACS functions.
+* Fixed so Doom teleportation also works fine with Heretic-like flying players or telestomp projectiles.
 
 Bug fixes
 ---------
@@ -145,3 +156,12 @@ Bug fixes
 * Fixed bad polyobject coordinate control in ACS GetPolyobjX, GetPolyobjY and SetPolyobjXY.
 * Fixed plane and horizon portals getting the wrong colormap.
 * Fixed the Boom sector colormap being chosen for the wrong coordinates from portals.
+* Fixed buggy rendering of 2-sided line dynasegs when crossing lines and viewed on the back side.
+* Fixed lack of interpolation with 2-sided linedef polyobjects.
+* Fixed lack of interpolation with polyobjects subject to multiple movements (e.g. rotation and translation
+  simultaneously).
+* Fixed monster interpolation bug when going up slopes, especially on liquid ones.
+* ACS ReplaceTextures wasn't updating the sky status when switching a sky texture.
+* Fixed lock-up caused by polyobject mirror cycles and override specials.
+* Fixed default melee range still being wrongly used despite possibility to customize it, for some
+  cases.

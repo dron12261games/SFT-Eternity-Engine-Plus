@@ -617,9 +617,10 @@ inline static fixed_t getTargetZ(Mobj *mo)
     return getThingZ(mo, mo->target);
 }
 
-bool P_CheckFloorCeilingForSpawning(const Mobj &mobj);
-bool P_RestingOnGround(const Mobj &mobj, const surface_t &floor);
-void P_NeutralizeForRemoval(Mobj &mobj);
+bool    P_CheckFloorCeilingForSpawning(const Mobj &mobj);
+bool    P_RestingOnGround(const Mobj &mobj, const surface_t &floor);
+void    P_NeutralizeForRemoval(Mobj &mobj);
+fixed_t P_GetMeleeRange(const Mobj &mobj);
 
 //=============================================================================
 //
@@ -847,6 +848,11 @@ inline static bool P_mobjOnSurface(const Mobj &mobj)
 inline static void P_transferFriendship(Mobj &target, const Mobj &source)
 {
     target.flags = (target.flags & ~MF_FRIEND) | (source.flags & MF_FRIEND);
+}
+
+inline static bool P_allowTeleport(const Mobj &thing)
+{
+    return !(thing.flags & MF_MISSILE) || thing.flags3 & MF3_TELESTOMP;
 }
 
 #endif

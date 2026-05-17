@@ -43,6 +43,7 @@
 #include "e_hash.h"
 #include "e_inventory.h"
 #include "e_mod.h"
+#include "e_player.h"
 #include "e_states.h"
 #include "e_things.h"
 #include "e_weapons.h"
@@ -56,9 +57,11 @@
 #include "p_map3d.h"
 #include "p_maputl.h"
 #include "p_portal.h" // ioanch 20160116
+#include "p_portalcross.h"
 #include "p_spec.h"
 #include "p_xenemy.h"
 #include "r_data.h"
+#include "r_draw.h"
 #include "r_main.h"
 #include "r_sky.h"
 #include "r_state.h"
@@ -67,6 +70,7 @@
 #include "doomstat.h"
 #include "metaapi.h"
 #include "e_lib.h"
+#include "wi_stuff.h"
 #include "e_string.h"
 
 #include "ACSVM/Scope.hpp"
@@ -75,6 +79,16 @@
 //=============================================================================
 // Local Utilities
 //
+
+static bool checkBoolean(int value, const char *name, const char *function)
+{
+    if(value != 0 && value != 1)
+    {
+        doom_warningf("Invalid %s %d in %s", name, value, function);
+        return false;
+    }
+    return true;
+}
 
 //
 // ACS_ChkThingProp
@@ -409,6 +423,7 @@ bool ACS_CF_CheckSight(ACS_CF_ARGS)
     if(argV[2])
     {
         doom_warningf("Unexpected nonzero flags for ACS CheckSight.");
+        return false;
     }
 
     while((mo1 = P_FindMobjFromTID(tid1, mo1, info->mo)))
@@ -560,6 +575,153 @@ bool ACS_CF_CheckActorFloorTexture(ACS_CF_ARGS)
     return ACS_ChkThingProp(static_cast<ACSThread *>(thread), argV[0], ACS_TP_FloorTex, argV[1]);
 }
 
+enum class RenderStyle : int
+{
+    none   = 0, // invisible
+    normal = 1, // solid
+    fuzzy  = 2, // spectre
+    // soulTrans          = 3,
+    // optFuzzy           = 4,
+    // stencil            = 5,
+    // addStencil         = 6,
+    // addShaded          = 7,
+    translucent = 64, // default Boom or Heretic translucent, or custom alpha
+    add         = 65, // additive translucency
+    // shaded             = 66,
+    // translucentStencil = 67,
+    // shadow             = 68,
+    subtract        = 69, // subtractive translucency
+    translucencyMap = 70, // custom Boom translucency map
+};
+
+// Same algorithm as in R_getDrawStyle. Can't reuse that, because this has to be user setting independent, and that one
+// is time-critical
+static RenderStyle getRenderStyle(const Mobj &thing)
+{
+    if(thing.flags & MF_NOSECTOR || thing.flags2 & MF2_DONTDRAW || !thing.translucency)
+        return RenderStyle::none;
+    if(thing.flags & MF_SHADOW)
+        return RenderStyle::fuzzy;
+    if(thing.tranmap >= 0)
+        return RenderStyle::translucencyMap;
+    if(thing.flags3 & MF3_TLSTYLEADD)
+        return RenderStyle::add;
+    if(thing.flags4 & MF4_TLSTYLESUB)
+        return RenderStyle::subtract;
+    if(uint16_t(thing.translucency - 1) < FRACUNIT - 1)
+        return RenderStyle::translucent;
+    if(thing.flags3 & MF3_GHOST)
+        return rTintTableIndex == -1 ? RenderStyle::translucent : RenderStyle::translucencyMap;
+    if(thing.flags & MF_TRANSLUCENT)
+        return RenderStyle::translucencyMap;
+    return RenderStyle::normal;
+}
+
+static void setRenderStyle(Mobj &thing, RenderStyle style)
+{
+    // Check the property
+    switch(style)
+    {
+    case RenderStyle::none:
+    case RenderStyle::normal:
+    case RenderStyle::fuzzy:
+    case RenderStyle::translucent:
+    case RenderStyle::add:
+    case RenderStyle::subtract:
+    case RenderStyle::translucencyMap: break;
+    default:                           doom_warningf("Set APROP_RenderStyle: invalid property %d", (int)style); return;
+    }
+
+    // Clear existing properties
+    // NOTE: we can't disable MF_NOSECTOR, so if it was set, the render style stays "none".
+    thing.flags        &= ~(MF_SHADOW | MF_TRANSLUCENT);
+    thing.flags2       &= ~MF2_DONTDRAW;
+    thing.flags3       &= ~(MF3_TLSTYLEADD | MF3_GHOST);
+    thing.flags4       &= ~MF4_TLSTYLESUB;
+    thing.translucency  = FRACUNIT;
+    thing.tranmap       = -1;
+
+    constexpr fixed_t boomTranMapRatio = 43008; // 65.625% according to https://doomwiki.org/wiki/TRANMAP
+
+    switch(style)
+    {
+    case RenderStyle::none:
+        // Set the defining flag
+        thing.flags2 |= MF2_DONTDRAW;
+        // Reset the other properties
+        thing.flags        |= thing.info->flags & (MF_SHADOW | MF_TRANSLUCENT);
+        thing.flags3       |= thing.info->flags3 & (MF3_TLSTYLEADD | MF3_GHOST);
+        thing.flags4       |= thing.info->flags4 & MF4_TLSTYLESUB;
+        thing.translucency  = thing.info->translucency;
+        thing.tranmap       = thing.info->tranmap;
+        break;
+    case RenderStyle::normal: break;
+    case RenderStyle::fuzzy:
+        thing.flags        |= MF_SHADOW;
+        thing.flags        |= thing.info->flags & MF_TRANSLUCENT;
+        thing.flags3       |= thing.info->flags3 & (MF3_TLSTYLEADD | MF3_GHOST);
+        thing.flags4       |= thing.info->flags4 & MF4_TLSTYLESUB;
+        thing.translucency  = thing.info->translucency;
+        if(!thing.translucency)
+            thing.translucency = boomTranMapRatio;
+        thing.tranmap = thing.info->tranmap;
+        break;
+    case RenderStyle::translucent:
+        thing.translucency = thing.info->translucency;
+        if(!thing.translucency || thing.translucency >= FRACUNIT)
+            thing.translucency = boomTranMapRatio;
+        thing.flags  |= thing.info->flags & MF_TRANSLUCENT;
+        thing.flags3 |= thing.info->flags3 & MF3_GHOST;
+        break;
+    case RenderStyle::add:
+        thing.flags3       |= MF3_TLSTYLEADD;
+        thing.flags        |= thing.info->flags & MF_TRANSLUCENT;
+        thing.flags3       |= thing.info->flags3 & MF3_GHOST;
+        thing.flags4       |= thing.info->flags4 & MF4_TLSTYLESUB;
+        thing.translucency  = thing.info->translucency;
+        if(!thing.translucency)
+            thing.translucency = boomTranMapRatio;
+        break;
+    case RenderStyle::subtract:
+        thing.flags4       |= MF4_TLSTYLESUB;
+        thing.flags        |= thing.info->flags & MF_TRANSLUCENT;
+        thing.flags3       |= thing.info->flags3 & MF3_GHOST;
+        thing.translucency  = thing.info->translucency;
+        if(!thing.translucency)
+            thing.translucency = boomTranMapRatio;
+        break;
+    case RenderStyle::translucencyMap:
+        if(thing.info->tranmap >= 0)
+        {
+            thing.tranmap       = thing.info->tranmap;
+            thing.flags        |= thing.info->flags & MF_TRANSLUCENT;
+            thing.flags3       |= thing.info->flags3 & (MF3_TLSTYLEADD | MF3_GHOST);
+            thing.flags4       |= thing.info->flags4 & MF4_TLSTYLESUB;
+            thing.translucency  = thing.info->translucency;
+            if(!thing.translucency)
+                thing.translucency = boomTranMapRatio;
+        }
+        else if(thing.info->flags3 & MF3_GHOST && rTintTableIndex >= 0)
+        {
+            thing.flags3 |= MF3_GHOST;
+            thing.flags  |= thing.info->flags & MF_TRANSLUCENT;
+        }
+        else
+            thing.flags |= MF_TRANSLUCENT;
+        break;
+    default: break; // error already sent
+    }
+}
+
+static bool checkSoundStringID(const ACSThread *thread, int soundindex, uint32_t val)
+{
+    const char *const      string = thread->scopeMap->getString(val)->str;
+    const sfxinfo_t *const info   = E_SoundForUnknownTypeDEHNum(soundindex);
+    if(!info)
+        return !strcasecmp(string, "none") || estrempty(string);
+    return (info->mnemonic && !strcasecmp(info->mnemonic, string)) || !strcasecmp(info->name, string);
+}
+
 //
 // ACS_ChkThingProp
 //
@@ -574,15 +736,17 @@ bool ACS_ChkThingProp(const ACSThread *thread, Mobj *mo, uint32_t var, uint32_t 
     case ACS_TP_Speed:        return static_cast<uint32_t>(mo->info->speed) == val;
     case ACS_TP_Damage:       return static_cast<uint32_t>(mo->damage) == val;
     case ACS_TP_Alpha:        return static_cast<uint32_t>(mo->translucency) == val;
-    case ACS_TP_RenderStyle:  return false;
-    case ACS_TP_SeeSound:     return false;
-    case ACS_TP_AttackSound:  return false;
-    case ACS_TP_PainSound:    return false;
-    case ACS_TP_DeathSound:   return false;
-    case ACS_TP_ActiveSound:  return false;
+    case ACS_TP_RenderStyle:  return static_cast<uint32_t>(getRenderStyle(*mo)) == val;
+    case ACS_TP_SeeSound:     return checkSoundStringID(thread, mo->info->seesound, val);
+    case ACS_TP_AttackSound:  return checkSoundStringID(thread, mo->info->attacksound, val);
+    case ACS_TP_PainSound:    return checkSoundStringID(thread, mo->info->painsound, val);
+    case ACS_TP_DeathSound:   return checkSoundStringID(thread, mo->info->deathsound, val);
+    case ACS_TP_ActiveSound:  return checkSoundStringID(thread, mo->info->activesound, val);
     case ACS_TP_Ambush:       return !!(mo->flags & MF_AMBUSH) == !!val;
     case ACS_TP_Invulnerable: return !!(mo->flags2 & MF2_INVULNERABLE) == !!val;
-    case ACS_TP_JumpZ:        return false;
+    case ACS_TP_JumpZ:
+        // should be correct if comparing with 0 for non-players
+        return mo->player && mo->player->pclass ? mo->player->pclass->jumpspeed == static_cast<fixed_t>(val) : !val;
     case ACS_TP_ChaseGoal:    return false;
     case ACS_TP_Frightened:   return false;
     case ACS_TP_Friendly:     return !!(mo->flags & MF_FRIEND) == !!val;
@@ -607,8 +771,10 @@ bool ACS_ChkThingProp(const ACSThread *thread, Mobj *mo, uint32_t var, uint32_t 
     case ACS_TP_Height:       return static_cast<uint32_t>(mo->height) == val;
     case ACS_TP_Radius:       return static_cast<uint32_t>(mo->radius) == val;
     case ACS_TP_ReactionTime: return static_cast<uint32_t>(mo->reactiontime) == val;
-    case ACS_TP_MeleeRange:   return MELEERANGE == val;
-    case ACS_TP_ViewHeight:   return false;
+    case ACS_TP_MeleeRange:   return P_GetMeleeRange(*mo) == val;
+    case ACS_TP_ViewHeight:
+        // should be correct if comparing with 0 for non-players
+        return mo->player && mo->player->pclass ? static_cast<uint32_t>(mo->player->pclass->viewheight) == val : !val;
     case ACS_TP_AttackZOff:   return false;
     case ACS_TP_StencilColor: return false;
     case ACS_TP_Friction:     return false;
@@ -627,14 +793,16 @@ bool ACS_ChkThingProp(const ACSThread *thread, Mobj *mo, uint32_t var, uint32_t 
     case ACS_TP_CeilTex:
     {
         const char *const textureName = thread->scopeMap->getString(val)->str;
-        const int         pic         = mo->subsector->sector->srf.ceiling.pic;
+        const sector_t   *sector      = P_ExtremeSectorAtPoint(mo, surf_ceil);
+        const int         pic         = sector->srf.ceiling.pic;
         return pic == R_FindFlat(textureName) || pic == R_FindWall(textureName);
     }
     case ACS_TP_CeilZ: return static_cast<uint32_t>(mo->zref.ceiling) == val;
     case ACS_TP_FloorTex:
     {
         const char *const textureName = thread->scopeMap->getString(val)->str;
-        const int         pic         = mo->subsector->sector->srf.floor.pic;
+        const sector_t   *sector      = P_ExtremeSectorAtPoint(mo, surf_floor);
+        const int         pic         = sector->srf.floor.pic;
         return pic == R_FindFlat(textureName) || pic == R_FindWall(textureName);
     }
     case ACS_TP_FloorZ:       return static_cast<uint32_t>(mo->zref.floor) == val;
@@ -842,6 +1010,13 @@ bool ACS_CF_GetCVar(ACS_CF_ARGS)
         return false;
     }
 
+    if(!(command->flags & cf_server))
+    {
+        doom_warningf("Invalid non-server variable in ACS GetCVar: %s", name);
+        thread->dataStk.push(0);
+        return false;
+    }
+
     switch(var->type)
     {
     case vt_int:       thread->dataStk.push(*(int *)var->variable); break;
@@ -867,6 +1042,13 @@ bool ACS_CF_GetCVarString(ACS_CF_ARGS)
 
     if(!(command = C_GetCmdForName(name)) || !(var = command->variable))
     {
+        thread->dataStk.push(0);
+        return false;
+    }
+
+    if(!(command->flags & cf_server))
+    {
+        doom_warningf("Invalid non-server variable in ACS GetCVarString: %s", name);
         thread->dataStk.push(0);
         return false;
     }
@@ -917,7 +1099,7 @@ uint32_t ACS_GetLevelProp(uint32_t var)
     switch(var)
     {
     case ACS_LP_ParTime:        return LevelInfo.partime;
-    case ACS_LP_ClusterNumber:  return 0;
+    case ACS_LP_ClusterNumber:  return gameepisode;
     case ACS_LP_LevelNumber:    return gamemap;
     case ACS_LP_TotalSecrets:   return totalsecret;
     case ACS_LP_FoundSecrets:   return G_TotalFoundSecrets();
@@ -925,7 +1107,7 @@ uint32_t ACS_GetLevelProp(uint32_t var)
     case ACS_LP_FoundItems:     return G_TotalFoundItems();
     case ACS_LP_TotalMonsters:  return totalmonsters;
     case ACS_LP_KilledMonsters: return G_TotalKilledMonsters();
-    case ACS_LP_SuckTime:       return 1;
+    case ACS_LP_SuckTime:       return SUCK_TIME;
 
     default: return 0;
     }
@@ -1091,11 +1273,30 @@ bool ACS_CF_GetPlayerInput(ACS_CF_ARGS)
             if(player->cmd.buttons & BT_ATTACK)
                 result |= BUTTON_ATTACK;
 
+            // On old demos it's BT_CHANGE and doesn't matter
+            if(player->cmd.buttons & BTN_ATTACK_ALT && demo_version >= 401)
+                result |= BUTTON_ALTATTACK;
+
             if(player->cmd.buttons & BT_USE)
                 result |= BUTTON_USE;
 
             if(player->cmd.actions & AC_JUMP)
                 result |= BUTTON_JUMP;
+
+            if(player->cmd.actions & AC_RELOAD)
+                result |= BUTTON_RELOAD;
+
+            if(player->cmd.actions & AC_ZOOM)
+                result |= BUTTON_ZOOM;
+
+            if(player->cmd.actions & AC_USER1)
+                result |= BUTTON_USER1;
+            if(player->cmd.actions & AC_USER2)
+                result |= BUTTON_USER2;
+            if(player->cmd.actions & AC_USER3)
+                result |= BUTTON_USER3;
+            if(player->cmd.actions & AC_USER4)
+                result |= BUTTON_USER4;
 
             break;
 
@@ -1117,6 +1318,11 @@ bool ACS_CF_GetPlayerInput(ACS_CF_ARGS)
         case MODINPUT_SIDEMOVE:
         case INPUT_SIDEMOVE: //
             result = player->cmd.sidemove * 2048;
+            break;
+
+        case MODINPUT_UPMOVE:
+        case INPUT_UPMOVE: //
+            result = player->cmd.fly;
             break;
 
         default: //
@@ -1187,23 +1393,24 @@ bool ACS_CF_SetPolyobjXY(ACS_CF_ARGS)
 // ACS_CF_GetScreenH
 //
 // int GetScreenHeight(void);
+// REMOVED BECAUSE IT CAN BE USED MALICIOUSLY
 //
-bool ACS_CF_GetScreenH(ACS_CF_ARGS)
-{
-    thread->dataStk.push(video.height);
-    return false;
-}
+// bool ACS_CF_GetScreenH(ACS_CF_ARGS)
+// {
+//     thread->dataStk.push(video.height);
+//     return false;
+// }
 
 //
 // ACS_CF_GetScreenW
 //
 // int GetScreenWidth(void);
 //
-bool ACS_CF_GetScreenW(ACS_CF_ARGS)
-{
-    thread->dataStk.push(video.width);
-    return false;
-}
+// bool ACS_CF_GetScreenW(ACS_CF_ARGS)
+// {
+//     thread->dataStk.push(video.width);
+//     return false;
+// }
 
 //
 // fixed GetSectorCeilingZ(int tag, int x, int y);
@@ -1310,7 +1517,7 @@ uint32_t ACS_GetThingProp(Mobj *mo, uint32_t prop)
     case ACS_TP_Speed:        return mo->info->speed;
     case ACS_TP_Damage:       return mo->damage;
     case ACS_TP_Alpha:        return mo->translucency;
-    case ACS_TP_RenderStyle:  return 0;
+    case ACS_TP_RenderStyle:  return static_cast<uint32_t>(getRenderStyle(*mo));
     case ACS_TP_SeeSound:     return 0;
     case ACS_TP_AttackSound:  return 0;
     case ACS_TP_PainSound:    return 0;
@@ -1318,7 +1525,7 @@ uint32_t ACS_GetThingProp(Mobj *mo, uint32_t prop)
     case ACS_TP_ActiveSound:  return 0;
     case ACS_TP_Ambush:       return !!(mo->flags & MF_AMBUSH);
     case ACS_TP_Invulnerable: return !!(mo->flags2 & MF2_INVULNERABLE);
-    case ACS_TP_JumpZ:        return 0;
+    case ACS_TP_JumpZ:        return mo->player && mo->player->pclass ? mo->player->pclass->jumpspeed : 0;
     case ACS_TP_ChaseGoal:    return 0;
     case ACS_TP_Frightened:   return 0;
     case ACS_TP_Friendly:     return !!(mo->flags & MF_FRIEND);
@@ -1343,8 +1550,8 @@ uint32_t ACS_GetThingProp(Mobj *mo, uint32_t prop)
     case ACS_TP_Height:       return mo->height;
     case ACS_TP_Radius:       return mo->radius;
     case ACS_TP_ReactionTime: return mo->reactiontime;
-    case ACS_TP_MeleeRange:   return MELEERANGE;
-    case ACS_TP_ViewHeight:   return 0;
+    case ACS_TP_MeleeRange:   return P_GetMeleeRange(*mo);
+    case ACS_TP_ViewHeight:   return mo->player && mo->player->pclass ? mo->player->pclass->viewheight : 0;
     case ACS_TP_AttackZOff:   return 0;
     case ACS_TP_StencilColor: return 0;
     case ACS_TP_Friction:     return 0;
@@ -1735,7 +1942,7 @@ bool ACS_CF_ReplaceTextures(ACS_CF_ARGS)
                 sector->srf.floor.pic = newflat;
 
             if(!(flags & RETEX_NOT_CEIL) && sector->srf.ceiling.pic == oldflat)
-                sector->srf.ceiling.pic = newflat;
+                P_SetSectorCeilingPic(sector, newflat);
         }
     }
 
@@ -1904,8 +2111,6 @@ enum
     BLOCK_EVERYTHING,
     BLOCK_RAILING,
     BLOCK_PLAYERS,
-    BLOCK_MONSTERS_OFF,
-    BLOCK_MONSTERS_ON,
 };
 
 //
@@ -1924,27 +2129,41 @@ static void ACS_setLineBlocking(const ACSThread *thread, int tag, int block)
         {
         case BLOCK_NOTHING:
             // clear the flags
-            l->flags    &= ~ML_BLOCKING;
+            l->flags    &= ~(ML_BLOCKING | ML_BLOCKPLAYERS);
             l->extflags &= ~EX_ML_BLOCKALL;
             break;
         case BLOCK_CREATURES: //
             l->extflags &= ~EX_ML_BLOCKALL;
             l->flags    |= ML_BLOCKING;
+            l->flags    &= ~ML_BLOCKPLAYERS;
             break;
         case BLOCK_EVERYTHING: // ZDoom extension - block everything
             l->flags    |= ML_BLOCKING;
+            l->flags    &= ~ML_BLOCKPLAYERS;
             l->extflags |= EX_ML_BLOCKALL;
             break;
-        case BLOCK_MONSTERS_OFF: //
-            l->flags &= ~ML_BLOCKMONSTERS;
-            break;
-        case BLOCK_MONSTERS_ON: //
-            l->flags |= ML_BLOCKMONSTERS;
+        case BLOCK_PLAYERS:
+            l->flags    |= ML_BLOCKPLAYERS;
+            l->flags    &= ~ML_BLOCKING;
+            l->extflags &= ~EX_ML_BLOCKALL;
             break;
         default: // Others not implemented yet :P
+            // printz: but warn.
+            doom_printf("Invalid option %d for SetLineBlocking", block);
             break;
         }
     }
+}
+
+static void ACS_setLineMonsterBlocking(line_t *defaultLine, int tag, bool block)
+{
+    line_t *line;
+    int     linenum = -1;
+    while((line = P_FindLine(tag, &linenum, defaultLine)))
+        if(block)
+            line->flags |= ML_BLOCKMONSTERS;
+        else
+            line->flags &= ~ML_BLOCKMONSTERS;
 }
 
 //
@@ -1961,8 +2180,9 @@ bool ACS_CF_SetLineBlocking(ACS_CF_ARGS)
 //
 bool ACS_CF_SetLineMonsterBlocking(ACS_CF_ARGS)
 {
-    ACS_setLineBlocking(static_cast<const ACSThread *>(thread), argV[0],
-                        argV[1] ? BLOCK_MONSTERS_ON : BLOCK_MONSTERS_OFF);
+    if(!checkBoolean(argV[1], "block", "SetLineMonsterBlocking"))
+        return false;
+    ACS_setLineMonsterBlocking(static_cast<const ACSThread *>(thread)->info.line, argV[0], !!argV[1]);
     return false;
 }
 
@@ -1992,8 +2212,13 @@ bool ACS_CF_SetLineSpecial(ACS_CF_ARGS)
 //
 bool ACS_CF_SetLineTexture(ACS_CF_ARGS)
 {
-    line_t *triggerLine = static_cast<const ACSThread *>(thread)->info.line;
-    P_ChangeLineTex(thread->scopeMap->getString(argV[3])->str, argV[2], argV[1], argV[0], true, triggerLine);
+    line_t           *triggerLine = static_cast<const ACSThread *>(thread)->info.line;
+    const char *const texture     = thread->scopeMap->getString(argV[3])->str;
+    const int         pos         = argV[2];
+    const int         side        = argV[1];
+    const int         tag         = argV[0];
+
+    P_ChangeLineTex(texture, pos, side, tag, triggerLine);
     return false;
 }
 
@@ -2064,7 +2289,7 @@ bool ACS_CF_SetSkyScrollSpeed(ACS_CF_ARGS)
 }
 
 //
-// void SetActorAngle(int tid, fixed angle, int interpolate = 0);
+// void SetActorAngle(int tid, fixed angle);
 //
 bool ACS_CF_SetActorAngle(ACS_CF_ARGS)
 {
@@ -2097,7 +2322,7 @@ bool ACS_CF_ChangeActorAngle(ACS_CF_ARGS)
 }
 
 //
-// int SetActorVelocity(int tid, fixed momx, fixed momy, fixed momz, int add);
+// int SetActorVelocity(int tid, fixed momx, fixed momy, fixed momz, bool add, bool bob);
 //
 bool ACS_CF_SetActorVelocity(ACS_CF_ARGS)
 {
@@ -2106,8 +2331,13 @@ bool ACS_CF_SetActorVelocity(ACS_CF_ARGS)
     fixed_t momx = argV[1];
     fixed_t momy = argV[2];
     fixed_t momz = argV[3];
-    bool    add  = argV[4] ? true : false;
-    Mobj   *mo   = nullptr;
+    int     add  = argV[4];
+    if(!checkBoolean(add, "add", "SetActorVelocity"))
+        return false;
+    int bob = argV[5];
+    if(!checkBoolean(bob, "bob", "SetActorVelocity"))
+        return false;
+    Mobj *mo = nullptr;
 
     while((mo = P_FindMobjFromTID(tid, mo, info->mo)))
     {
@@ -2123,6 +2353,11 @@ bool ACS_CF_SetActorVelocity(ACS_CF_ARGS)
             mo->momy = momy;
             mo->momz = momz;
         }
+        if(mo->player && bob)
+        {
+            mo->player->momx = mo->momx;
+            mo->player->momy = mo->momy;
+        }
     }
 
     thread->dataStk.push(0);
@@ -2130,7 +2365,7 @@ bool ACS_CF_SetActorVelocity(ACS_CF_ARGS)
 }
 
 //
-// void SetActorPitch(int tid, fixed pitch, int interpolate = 0);
+// void SetActorPitch(int tid, fixed pitch);
 //
 bool ACS_CF_SetActorPitch(ACS_CF_ARGS)
 {
@@ -2145,7 +2380,9 @@ bool ACS_CF_ChangeActorPitch(ACS_CF_ARGS)
     auto        athread     = static_cast<ACSThread *>(thread);
     int         tid         = static_cast<int>(argV[0]);
     ACSVM::Word val         = argV[1];
-    bool        interpolate = argC > 2 ? !!argV[2] : false;
+    int         interpolate = argC > 2 ? argV[2] : false;
+    if(!checkBoolean(interpolate, "interpolate", "ChangeActorPitch"))
+        return false;
 
     thread->dataStk.push(0);
 
@@ -2174,9 +2411,12 @@ bool ACS_CF_SetActorPosition(ACS_CF_ARGS)
     fixed_t  x    = argV[1];
     fixed_t  y    = argV[2];
     fixed_t  z    = argV[3];
-    bool     fog  = argV[4] ? true : false;
+    int      fog  = argV[4];
     uint32_t res  = 0;
     Mobj    *mo;
+
+    if(!checkBoolean(fog, "fog", "SetActorPosition"))
+        return false;
 
     if((mo = P_FindMobjFromTID(tid, nullptr, info->mo)))
     {
@@ -2220,7 +2460,7 @@ bool ACS_CF_SetActorPosition(ACS_CF_ARGS)
                 S_StartSound(fogmo, GameModeInfo->teleSound);
 
                 // ... and destination.
-                v3fixed_t fogpos = P_GetArrivalTelefogLocation({ x, y, z }, mo->angle);
+                v3fixed_t fogpos = P_GetArrivalTelefogLocation(*mo, { x, y, z }, mo->angle);
                 fogmo = P_SpawnMobj(fogpos.x, fogpos.y, fogpos.z, E_SafeThingName(GameModeInfo->teleFogType));
                 S_StartSound(fogmo, GameModeInfo->teleSound);
             }
@@ -2264,7 +2504,7 @@ void ACS_SetThingProp(Mobj *thing, uint32_t var, uint32_t val)
     case ACS_TP_Speed:        break;
     case ACS_TP_Damage:       thing->damage = val; break;
     case ACS_TP_Alpha:        thing->translucency = val; break;
-    case ACS_TP_RenderStyle:  break;
+    case ACS_TP_RenderStyle:  setRenderStyle(*thing, static_cast<RenderStyle>(val)); break;
     case ACS_TP_SeeSound:     break;
     case ACS_TP_AttackSound:  break;
     case ACS_TP_PainSound:    break;
@@ -2368,6 +2608,17 @@ bool ACS_CF_SetThingSpecial(ACS_CF_ARGS)
     return false;
 }
 
+// Returns true if removed
+static bool removeLastStateNameDotComponent(qstring &stateName)
+{
+    const size_t colonPos = stateName.findLastOf(':');
+    const size_t dotPos   = stateName.findLastOf('.');
+    if(dotPos == qstring::npos || (colonPos != qstring::npos && dotPos < colonPos))
+        return false;
+    stateName.truncate(dotPos);
+    return true;
+}
+
 //
 // int SetActorState(int tid, str state, int exact);
 //
@@ -2380,11 +2631,25 @@ bool ACS_CF_SetActorState(ACS_CF_ARGS)
     const state_t *state;
     uint32_t       count = 0;
     Mobj          *mo    = nullptr;
+    const int      exact = argV[2];
+
+    if(!checkBoolean(exact, "exact", "SetActorState"))
+    {
+        thread->dataStk.push(0);
+        return false;
+    }
 
     while((mo = P_FindMobjFromTID(tid, mo, info->mo)))
     {
         // Look for the named state for that type.
-        if((state = E_GetJumpInfo(mo->info, statename)))
+        state = E_GetJumpInfo(mo->info, statename);
+        if(!exact)
+        {
+            qstring stateNameQStr(statename);
+            while(!state && removeLastStateNameDotComponent(stateNameQStr))
+                state = E_GetJumpInfo(mo->info, stateNameQStr.constPtr());
+        }
+        if(state)
         {
             P_SetMobjState(mo, state->index);
             ++count;
@@ -2678,7 +2943,17 @@ bool ACS_CF_SpawnSpotFacingForced(ACS_CF_ARGS)
 //
 bool ACS_CF_Sqrt(ACS_CF_ARGS)
 {
-    thread->dataStk.push((uint32_t)sqrt((double)argV[0]));
+    double operand = static_cast<double>(static_cast<int>(argV[0]));
+    if(operand < 0)
+    {
+        // Complain about it like with division by 0.
+        doom_warningf("Invalid negative operand %d to square root", (int)argV[0]);
+        // But don't crash.
+        thread->dataStk.push(0);
+        return false;
+    }
+
+    thread->dataStk.push((uint32_t)floor(sqrt(operand)));
     return false;
 }
 
@@ -2687,6 +2962,16 @@ bool ACS_CF_Sqrt(ACS_CF_ARGS)
 //
 bool ACS_CF_FixedSqrt(ACS_CF_ARGS)
 {
+    double operand = M_FixedToDouble(argV[0]);
+    if(operand < 0)
+    {
+        // Complain about it like with division by 0.
+        doom_warningf("Invalid negative operand %g to square root", operand);
+        // But don't crash.
+        thread->dataStk.push(0);
+        return false;
+    }
+
     thread->dataStk.push(M_DoubleToFixed(sqrt(M_FixedToDouble(argV[0]))));
     return false;
 }
@@ -3131,6 +3416,11 @@ bool ACS_CF_Thing_Projectile2(ACS_CF_ARGS)
     fixed_t momy    = speed * finesine[angle >> ANGLETOFINESHIFT];
     fixed_t momz    = vspeed << FRACBITS;
 
+    if(!checkBoolean((int)argV[5], "gravity", "Thing_Projectile2"))
+    {
+        return false;
+    }
+
     if(type < 0 || type >= ACS_NUM_THINGTYPES)
         return false;
 
@@ -3203,16 +3493,21 @@ bool ACS_CF_UniqueTID(ACS_CF_ARGS)
     if(!tid || tid < 0)
         tid = P_RangeRandomEx(pr_script, 1, 0x7FFF);
 
+    int wraparound = 0;
     while(P_FindMobjFromTID(tid, nullptr, nullptr))
     {
         // Don't overflow the TID.
         if(tid == 0x7FFF)
+        {
             tid = 1;
+            ++wraparound;
+        }
         else
             ++tid;
 
-        // Avoid infinite loops.
-        if(!--max)
+        // Avoid infinite loops or give up if exhausted.
+        --max;
+        if(!max || wraparound >= 2)
         {
             tid = 0;
             break;

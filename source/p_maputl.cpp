@@ -34,6 +34,7 @@
 #include "ev_specials.h"
 #include "m_bbox.h"
 #include "m_compare.h"
+#include "p_info.h"
 #include "p_map.h"
 #include "p_map3d.h"
 #include "p_maputl.h"
@@ -590,19 +591,29 @@ lineopening_t P_SlopeOpeningPortalAware(v2fixed_t pos)
     return open;
 }
 
-void P_Get3DMidTexHeights(const line_t &line, const side_t &side, const sector_t &frontsector,
-                          const sector_t &backsector, fixed_t &texbot, fixed_t &textop, const v2fixed_t *point)
+void P_Get3DMidTexHeights(const line_t &line, const side_t &side, fixed_t &texbot, fixed_t &textop,
+                          const v2fixed_t *point)
 {
-    Surfaces<pslope_t *> *const slopes = point ? P_Get3DMidTexSlopes(line) : nullptr;
+    // Polyobject 3dmidtex lines can't be skewed
+    Surfaces<pslope_t *> *const slopes =
+        point && !(line.intflags & MLI_DYNASEGLINE) ? P_Get3DMidTexSlopes(line) : nullptr;
+
+    const Surfaces<fixed_t> *polyref = P_GetMidTexPolyobjectReference(line);
+    Surfaces<fixed_t>        frontReferenceHeights;
+    Surfaces<fixed_t>        backReferenceHeights;
+    if(polyref && line.intflags & MLI_DYNASEGLINE && !(line.extflags & EX_ML_WRAPMIDTEX))
+        frontReferenceHeights = backReferenceHeights = *polyref;
+    else
+    {
+        frontReferenceHeights.floor   = line.frontsector->srf.floor.height;
+        frontReferenceHeights.ceiling = line.frontsector->srf.ceiling.height;
+        backReferenceHeights.floor    = line.backsector->srf.floor.height;
+        backReferenceHeights.ceiling  = line.backsector->srf.ceiling.height;
+    }
 
     // For the usual case we must use the editor-specified heights to get the unsloped 3dmidtex positions
-    const auto   &frontceiling = frontsector.srf.ceiling;
-    const auto   &backceiling  = backsector.srf.ceiling;
-    const fixed_t opentop      = frontceiling.height < backceiling.height ? frontceiling.height : backceiling.height;
-
-    const auto   &frontfloor = frontsector.srf.floor;
-    const auto   &backfloor  = backsector.srf.floor;
-    const fixed_t openbottom = frontfloor.height > backfloor.height ? frontfloor.height : backfloor.height;
+    const fixed_t opentop    = emin(frontReferenceHeights.ceiling, backReferenceHeights.ceiling);
+    const fixed_t openbottom = emax(frontReferenceHeights.floor, backReferenceHeights.floor);
 
     if(!side.scale_mid_y || line.extflags & EX_ML_WRAPMIDTEX)
     {
@@ -668,11 +679,27 @@ lineopening_t P_LineOpening(const line_t *linedef, const Mobj *mo, const v2fixed
     {
         *lineclipflags = 0;
     }
-    const sector_t *openfrontsector = linedef->frontsector;
-    const sector_t *openbacksector  = linedef->backsector;
-    sector_t       *beyond          = linedef->intflags & MLI_1SPORTALLINE && linedef->beyondportalline ?
-                                          linedef->beyondportalline->frontsector :
-                                          nullptr;
+
+    const bool isPolyObj2Sided =
+        !P_LevelIsVanillaHexen() && linedef->flags & ML_TWOSIDED && linedef->intflags & MLI_DYNASEGLINE;
+
+    const sector_t *openfrontsector, *openbacksector;
+
+    if(isPolyObj2Sided)
+    {
+        // For a polyobject 2-sided line, we don't actually have a top and bottom limit -- that's established by other
+        // lines and by the mobj default, which is the center point -- which is what we default here. Use "point" as a
+        // callback anyway, but it's not reliable in general.
+        openfrontsector = openbacksector = R_PointInSubsector(mo ? mo->x : point.x, mo ? mo->y : point.y)->sector;
+    }
+    else
+    {
+        openfrontsector = linedef->frontsector;
+        openbacksector  = linedef->backsector;
+    }
+    sector_t *beyond = linedef->intflags & MLI_1SPORTALLINE && linedef->beyondportalline ?
+                           linedef->beyondportalline->frontsector :
+                           nullptr;
     if(beyond)
     {
         openbacksector = beyond;
@@ -804,7 +831,7 @@ lineopening_t P_LineOpening(const line_t *linedef, const Mobj *mo, const v2fixed
         side_t *side = &sides[linedef->sidenum[0]];
 
         const auto *midtexslopes = P_Get3DMidTexSlopes(*linedef);
-        P_Get3DMidTexHeights(*linedef, *side, *openfrontsector, *openbacksector, texbot, textop, &point);
+        P_Get3DMidTexHeights(*linedef, *side, texbot, textop, &point);
 
         texmid = (textop + texbot) / 2;
 
@@ -1629,4 +1656,3 @@ void P_CheckSpriteTouchingSectorLists()
 // Lee's Jan 19 sources
 //
 //----------------------------------------------------------------------------
-

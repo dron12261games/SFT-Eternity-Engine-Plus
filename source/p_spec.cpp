@@ -1785,7 +1785,7 @@ void P_SpawnDeferredSpecials(UDMFSetupSettings &setupSettings)
     }
 
     P_PostProcessSlopes();
-    P_Spawn3DMidTexSlopes();
+    P_SpawnMidTexExtras();
 }
 
 // haleyjd 04/11/10:
@@ -3751,4 +3751,3 @@ AMX_NATIVE_INFO pspec_Natives[] = {
 // Lee's Jan 19 sources
 //
 //----------------------------------------------------------------------------
-

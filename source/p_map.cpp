@@ -1958,8 +1958,9 @@ bool P_TryMove(Mobj *thing, fixed_t x, fixed_t y, int dropoff)
 
     // If going down slope while still having some distance, stick to it to avoid sliding off it
     // endlessly.
-    if(downslope && downslope->zdelta && thing->zref.slope.floor && thing->z > thing->zref.floor &&
-       thing->z <= thing->zref.floor + STEPSIZE)
+    // If going up slope, also adjust z to never be below zref floor, because otherwise we get bad interpolation with
+    // monsters.
+    if(downslope && downslope->zdelta && thing->zref.slope.floor && thing->z <= thing->zref.floor + STEPSIZE)
     {
         thing->z = thing->zref.floor;
     }
@@ -2377,7 +2378,7 @@ static void P_HitSlideLine(line_t *ld)
 //
 // PTR_SlideTraverse
 //
-static bool PTR_SlideTraverse(intercept_t *in, void *context)
+static bool PTR_SlideTraverse(intercept_t *in, void *context, const divline_t &)
 {
     line_t *li;
 
@@ -2493,9 +2494,12 @@ void P_SlideMove(Mobj *mo)
 
         bestslidefrac = FRACUNIT + 1;
 
-        P_PathTraverse(leadx, leady, leadx + mo->momx, leady + mo->momy, PT_ADDLINES, PTR_SlideTraverse);
-        P_PathTraverse(trailx, leady, trailx + mo->momx, leady + mo->momy, PT_ADDLINES, PTR_SlideTraverse);
-        P_PathTraverse(leadx, traily, leadx + mo->momx, traily + mo->momy, PT_ADDLINES, PTR_SlideTraverse);
+        P_PathTraverse({ leadx, leady }, { leadx + mo->momx, leady + mo->momy }, PT_ADDLINES | PT_COMPATIBILITY,
+                       PTR_SlideTraverse);
+        P_PathTraverse({ trailx, leady }, { trailx + mo->momx, leady + mo->momy }, PT_ADDLINES | PT_COMPATIBILITY,
+                       PTR_SlideTraverse);
+        P_PathTraverse({ leadx, traily }, { leadx + mo->momx, traily + mo->momy }, PT_ADDLINES | PT_COMPATIBILITY,
+                       PTR_SlideTraverse);
 
         // move up to the wall
 
@@ -3483,4 +3487,3 @@ bool P_OnGroundOrThing(const Mobj &mobj)
 //
 //
 //----------------------------------------------------------------------------
-

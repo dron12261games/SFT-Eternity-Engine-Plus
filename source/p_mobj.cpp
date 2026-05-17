@@ -670,7 +670,7 @@ static void P_reduceVelocityBySlope(Mobj &thing)
         return;
 
     // Offset to the corner that touches the slope. Also add portal if any
-    const linkoffset_t *link        = P_GetLinkOffset(thing.groupid, thing.zref.slope.floor->groupid);
+    const linkoffset_t *link        = P_GetLinkOffset(thing.groupid, *slope->groupid);
     const v2fixed_t     slopeoffset = { ((slope->normal.x < 0) - (slope->normal.x > 0)) * thing.radius + link->x,
                                         ((slope->normal.y < 0) - (slope->normal.y > 0)) * thing.radius + link->y };
     const v2fixed_t     source      = { thing.x, thing.y };
@@ -4089,7 +4089,7 @@ void P_AdjustFloorClip(Mobj *thing)
         if(m->m_sector->heightsec == -1 &&
            ((!m->m_sector->srf.floor.slope && thing->z == m->m_sector->srf.floor.height) ||
             (m->m_sector->srf.floor.slope && P_SlopesEqual(thing->zref.sector.floor, m->m_sector, surf_floor) &&
-             thing->z == thing->zref.floor)))
+             thing->z <= thing->zref.floor)))
         {
             fixed_t fclip = E_SectorFloorClip(m->m_sector);
 
@@ -4436,6 +4436,11 @@ void P_NeutralizeForRemoval(Mobj &mobj)
     mobj.flags3                       &= ~(MF3_PASSMOBJ);
     mobj.player                        = nullptr;
     mobj.health                        = -1000;
+}
+
+fixed_t P_GetMeleeRange(const Mobj &mobj)
+{
+    return mbf21_demo ? mobj.info->meleerange : MELEERANGE;
 }
 
 //
@@ -5205,4 +5210,3 @@ AMX_NATIVE_INFO mobj_Natives[] = {
 // Lee's Jan 19 sources
 //
 //----------------------------------------------------------------------------
-
